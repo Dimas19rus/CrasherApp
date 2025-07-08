@@ -22,10 +22,11 @@ CONFIG(release, debug|release) {
 
     QMAKE_LFLAGS_RELEASE += -Wl,--build-id
 
+    TARGET_PATH = $${DESTDIR}/$${TARGET}
     # Отдельные действия после сборки релиза (примеры objcopy)
-    QMAKE_POST_LINK = objcopy --only-keep-debug "$$DESTDIR/$$TARGET" "$$DESTDIR/$$TARGET.debug"; \
-                      objcopy --strip-debug "$$DESTDIR/$$TARGET"; \
-                      objcopy --add-gnu-debuglink="$$DESTDIR/$$TARGET.debug" "$$DESTDIR/$$TARGET"
+    QMAKE_POST_LINK = objcopy --only-keep-debug "$${TARGET_PATH}" "$${TARGET_PATH}.debug"; \
+                      objcopy --strip-debug "$${TARGET_PATH}"; \
+                      objcopy --add-gnu-debuglink="$${TARGET_PATH}.debug" "$${TARGET_PATH}"
 }
 
 SOURCES += \
