@@ -22,10 +22,9 @@ ModuleInfo g_module = {};
 std::string ErrorHandler::crashFolderStr;
 const char* ErrorHandler::crashFolder = nullptr;
 
-void ErrorHandler::setupSignalHandlers(const std::string& pathFolderCrash) {
+void ErrorHandler::setupSignalHandlers( const std::string& pathFolderCrash) {
     setCrashFolder(pathFolderCrash);
     ensureCrashFolderExists();
-    preloadModuleInfo();
 
     struct sigaction sa{};
     sa.sa_sigaction = &ErrorHandler::signalHandler;
@@ -37,15 +36,6 @@ void ErrorHandler::setupSignalHandlers(const std::string& pathFolderCrash) {
     sigaction(SIGFPE,  &sa, nullptr);
     sigaction(SIGILL,  &sa, nullptr);
     sigaction(SIGBUS,  &sa, nullptr);
-}
-
-void preloadModuleInfo() {
-    // получаем адрес любой функции из своей либы
-    Dl_info info{};
-    if (dladdr((void*)&preloadModuleInfo, &info) && info.dli_fname) {
-        g_module.name = info.dli_fname;
-        g_module.start = ErrorHandler::getBaseAddress(info.dli_fname);
-    }
 }
 
 uintptr_t ErrorHandler::getBaseAddress(const char* modulePath) {
@@ -116,10 +106,19 @@ void ErrorHandler::signalHandler(int sig, siginfo_t* info, void* ucontext) {
     void* ip = nullptr;
 #endif
 
-    // Имя библиотеки
-    const char* lib_name = g_module.name;
+    Dl_info infoDl{};
+    const char* lib_name = "unknown";
+    uintptr_t baseAddr = 0;
+    if (ip && dladdr(ip, &infoDl) && infoDl.dli_fname) {
+        lib_name = infoDl.dli_fname;
+        baseAddr = reinterpret_cast<uintptr_t>(infoDl.dli_fbase);
+    }
 
-    uintptr_t baseAddr = g_module.start;
+
+    // Имя библиотеки
+    //const char* lib_name = g_module.name;
+    //
+    //uintptr_t baseAddr = g_module.start;
     uintptr_t ipAddr = reinterpret_cast<uintptr_t>(ip);
     uintptr_t offset = 0;
     if (baseAddr != 0 && ipAddr >= baseAddr) {
@@ -138,23 +137,23 @@ void ErrorHandler::signalHandler(int sig, siginfo_t* info, void* ucontext) {
 
 
     // Формируем JSON объект
-    JsonObject root;
-    JsonObject signalObj;
+    auto root = std::make_shared<JsonObject>();
+    auto signalObj = std::make_shared<JsonObject>();
 
-    signalObj.insert(CrashReportFields::SIGNAL_NAME, JsonValue(signame));
-    signalObj.insert(CrashReportFields::SIGNAL_NUMBER, JsonValue(sig));
-    signalObj.insert(CrashReportFields::SIGNAL_ADDRESS, JsonValue((uintptr_t)info->si_addr));
+    signalObj->insert(CrashReportFields::SIGNAL_NAME, JsonValue(signame));
+    signalObj->insert(CrashReportFields::SIGNAL_NUMBER, JsonValue(sig));
+    signalObj->insert(CrashReportFields::SIGNAL_ADDRESS, JsonValue((uintptr_t)info->si_addr));
 
-    root.insert(CrashReportFields::TIME, JsonValue(timeBuf));
-    root.insert(CrashReportFields::SIGNAL, JsonValue(&signalObj));
-    root.insert(CrashReportFields::BINARY, JsonValue(lib_name));
-    root.insert(CrashReportFields::INSTRUCTION_POINTER, JsonValue(ipAddr));
-    root.insert(CrashReportFields::OFFSET, JsonValue(offset));
+    root->insert(CrashReportFields::TIME, JsonValue(timeBuf));
+    root->insert(CrashReportFields::SIGNAL, JsonValue(signalObj));
+    root->insert(CrashReportFields::BINARY, JsonValue(lib_name));
+    root->insert(CrashReportFields::INSTRUCTION_POINTER, JsonValue(ipAddr));
+    root->insert(CrashReportFields::OFFSET, JsonValue(offset));
 
     // Сериализация JSON в буфер (1024 байт)
     char buf[1024];
     JsonWriter writer(buf, sizeof(buf));
-    if (writer.write(JsonValue(&root))) {
+    if (writer.write(JsonValue(root))) {
         write(fd, buf, writer.length());
         write(fd, "\n", 1);
     } else {

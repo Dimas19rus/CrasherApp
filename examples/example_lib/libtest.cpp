@@ -1,5 +1,5 @@
 #include "libtest.h"
-#include "ErrorHandler.h"
+#include "error_handler.h"
 #include <iostream>
 #include <stdexcept>
 #include <csignal>

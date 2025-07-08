@@ -3,12 +3,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdint>
+#include <memory>
 #include <inttypes.h>
-
-class JsonValue;
-
-class JsonObject;
-class JsonArray;
 
 enum JsonType {
     JT_NULL,
@@ -20,79 +16,148 @@ enum JsonType {
     JT_HEX
 };
 
+class JsonObject;
+class JsonArray;
+
 class JsonValue {
     JsonType type;
     union {
         const char* str;
         int i;
         bool b;
-        JsonObject* obj;
-        JsonArray* arr;
+        std::shared_ptr<JsonObject> obj;
+        std::shared_ptr<JsonArray> arr;
         uintptr_t hex;
     };
+
 public:
-    JsonValue() : type(JT_NULL) {}
+    JsonValue() : type(JT_NULL), i(0) {}
     JsonValue(const char* s) : type(JT_STRING), str(s) {}
     JsonValue(int v) : type(JT_INT), i(v) {}
     JsonValue(bool v) : type(JT_BOOL), b(v) {}
-    JsonValue(JsonObject* o) : type(JT_OBJECT), obj(o) {}
-    JsonValue(JsonArray* a) : type(JT_ARRAY), arr(a) {}
-    //Конструктор для HEX передаем как значение uintptr_t
-    JsonValue(uintptr_t v) : type(JT_HEX), i(v) {}
+    JsonValue(std::shared_ptr<JsonObject> o) : type(JT_OBJECT), obj(std::move(o)) {}
+    JsonValue(std::shared_ptr<JsonArray> a) : type(JT_ARRAY), arr(std::move(a)) {}
+    JsonValue(uintptr_t v) : type(JT_HEX), hex(v) {}
+
+    JsonValue(const JsonValue& other);
+    JsonValue& operator=(const JsonValue& other);
+    ~JsonValue();
 
     JsonType getType() const { return type; }
     const char* getString() const { return str; }
     int getInt() const { return i; }
     bool getBool() const { return b; }
-    JsonObject* getObject() const { return obj; }
-    JsonArray* getArray() const { return arr; }
+    std::shared_ptr<JsonObject> getObject() const { return obj; }
+    std::shared_ptr<JsonArray> getArray() const { return arr; }
     uintptr_t getHex() const { return hex; }
-
 };
 
-// JsonObject: хранит пары ключ-значение (ограничим до фиксированного размера)
+// Для корректного управления union с std::shared_ptr — реализуем конструктор копирования, оператор присваивания и деструктор:
+
+JsonValue::JsonValue(const JsonValue& other) : type(other.type) {
+    switch (type) {
+    case JT_STRING:
+        str = other.str;
+        break;
+    case JT_INT:
+        i = other.i;
+        break;
+    case JT_BOOL:
+        b = other.b;
+        break;
+    case JT_OBJECT:
+        new (&obj) std::shared_ptr<JsonObject>(other.obj);
+        break;
+    case JT_ARRAY:
+        new (&arr) std::shared_ptr<JsonArray>(other.arr);
+        break;
+    case JT_HEX:
+        hex = other.hex;
+        break;
+    case JT_NULL:
+        i = 0;
+        break;
+    }
+}
+
+JsonValue& JsonValue::operator=(const JsonValue& other) {
+    if (this == &other) return *this;
+
+    // Очистка предыдущих данных при необходимости
+    if (type == JT_OBJECT) obj.~shared_ptr<JsonObject>();
+    else if (type == JT_ARRAY) arr.~shared_ptr<JsonArray>();
+
+    type = other.type;
+    switch (type) {
+    case JT_STRING:
+        str = other.str;
+        break;
+    case JT_INT:
+        i = other.i;
+        break;
+    case JT_BOOL:
+        b = other.b;
+        break;
+    case JT_OBJECT:
+        new (&obj) std::shared_ptr<JsonObject>(other.obj);
+        break;
+    case JT_ARRAY:
+        new (&arr) std::shared_ptr<JsonArray>(other.arr);
+        break;
+    case JT_HEX:
+        hex = other.hex;
+        break;
+    case JT_NULL:
+        i = 0;
+        break;
+    }
+    return *this;
+}
+
+JsonValue::~JsonValue() {
+    if (type == JT_OBJECT) obj.~shared_ptr<JsonObject>();
+    else if (type == JT_ARRAY) arr.~shared_ptr<JsonArray>();
+}
+
 class JsonObject {
     static const int MaxPairs = 16;
-    const char* keys[MaxPairs];
-    JsonValue values[MaxPairs];
+    const char* keys[MaxPairs]{};
+    JsonValue values[MaxPairs]{};
     int count = 0;
+
 public:
     bool insert(const char* key, const JsonValue& value) {
         if (count >= MaxPairs) return false;
         keys[count] = key;
-        values[count] = value;
-        ++count;
+        values[count++] = value;
         return true;
     }
-
     int size() const { return count; }
     const char* keyAt(int i) const { return keys[i]; }
     const JsonValue& valueAt(int i) const { return values[i]; }
     const JsonValue* find(const char* key) const {
-            for (int i = 0; i < count; ++i)
-                if (strcmp(keys[i], key) == 0)
-                    return &values[i];
-            return nullptr;
-        }
+        for (int i = 0; i < count; ++i)
+            if (strcmp(keys[i], key) == 0)
+                return &values[i];
+        return nullptr;
+    }
 };
 
-// JsonArray: хранит элементы (ограничим до фиксированного размера)
 class JsonArray {
     static const int MaxElements = 16;
-    JsonValue elements[MaxElements];
+    JsonValue elements[MaxElements]{};
     int count = 0;
+
 public:
     bool append(const JsonValue& val) {
         if (count >= MaxElements) return false;
         elements[count++] = val;
         return true;
     }
-
     int size() const { return count; }
     const JsonValue& at(int i) const { return elements[i]; }
 };
 
-// Простая сериализация в буфер (без malloc)
 class JsonWriter {
     char* buf;
     size_t capacity;
@@ -108,10 +173,22 @@ class JsonWriter {
     bool writeString(const char* s) {
         if (!writeRaw("\"", 1)) return false;
         for (; *s; ++s) {
-            if (*s == '\"' || *s == '\\') {
+            switch (*s) {
+            case '\"':
+            case '\\':
                 if (!writeRaw("\\", 1)) return false;
                 if (!writeRaw(s, 1)) return false;
-            } else {
+                break;
+            case '\n':
+                if (!writeRaw("\\n", 2)) return false;
+                break;
+            case '\r':
+                if (!writeRaw("\\r", 2)) return false;
+                break;
+            case '\t':
+                if (!writeRaw("\\t", 2)) return false;
+                break;
+            default:
                 if (!writeRaw(s, 1)) return false;
             }
         }
@@ -120,25 +197,26 @@ class JsonWriter {
 
     bool writeValue(const JsonValue& val) {
         switch (val.getType()) {
-            case JT_STRING: return writeString(val.getString());
-            case JT_INT: {
-                char numbuf[20];
-                int len = snprintf(numbuf, sizeof(numbuf), "%d", val.getInt());
-                return writeRaw(numbuf, len);
-            }
-            case JT_BOOL:
-                return writeRaw(val.getBool() ? "true" : "false", val.getBool() ? 4 : 5);
-            case JT_OBJECT:
-                return writeObject(*val.getObject());
-            case JT_ARRAY:
-                return writeArray(*val.getArray());
-            case JT_NULL:
-                return writeRaw("null", 4);
-            case JT_HEX: {
-                char buf[32];
-                int len = snprintf(buf, sizeof(buf), "0x%" PRIXPTR, val.getHex());
-                return writeRaw(buf, len);
-            }
+        case JT_STRING:
+            return writeString(val.getString());
+        case JT_INT: {
+            char numbuf[20];
+            int len = snprintf(numbuf, sizeof(numbuf), "%d", val.getInt());
+            return writeRaw(numbuf, len);
+        }
+        case JT_BOOL:
+            return writeRaw(val.getBool() ? "true" : "false", val.getBool() ? 4 : 5);
+        case JT_OBJECT:
+            return writeObject(*val.getObject());
+        case JT_ARRAY:
+            return writeArray(*val.getArray());
+        case JT_NULL:
+            return writeRaw("null", 4);
+        case JT_HEX: {
+            char buf[32];
+            int len = snprintf(buf, sizeof(buf), "\"0x%" PRIXPTR "\"", val.getHex());
+            return writeRaw(buf, len);
+        }
         }
         return false;
     }

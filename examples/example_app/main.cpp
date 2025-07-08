@@ -1,6 +1,6 @@
 #include "mainwindow.h"
 
-#include "ErrorHandler.h"
+#include "error_handler.h"
 #include <QApplication>
 
 #include <iostream>

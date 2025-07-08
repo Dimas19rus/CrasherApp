@@ -1,27 +1,45 @@
 #include "demon_crash.h"
 
 #include <QCoreApplication>
-#include <QFile>
-#include <QTextStream>
-#include <QProcess>
-#include <QStringList>
-#include <QRegularExpression>
+#include <QDir>
 #include <QFileInfo>
+#include <QTextStream>
 
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
 
-    if (argc < 3) {
-        QTextStream(stderr) << "Usage: LogViewer <input_log> <output_log> [<path_exe>] [<show_system_frames '0'|1>]\n";
+    if (argc < 2) {
+        QTextStream(stderr) << "Usage: LogViewer <crash_folder> [<path_exe>] [<show_system_frames '0'|1>]\n";
         return 1;
     }
 
-    QString inputLogPath = argv[1];
-    QString outputLogPath = argv[2];
-    QString exePath = (argc > 3) ? argv[3] : QString(); // если нет — пустая строка
-    bool showSystemFrames = (argc > 4) ? (QString(argv[4]) == "1") : false; // по умолчанию false
+    QString crashDirPath = argv[1];
+    QString exePath = (argc > 2) ? argv[2] : QString();
+    bool showSystemFrames = (argc > 3) ? (QString(argv[3]) == "1") : false;
 
-    DemonCrash demon(inputLogPath, outputLogPath, exePath, showSystemFrames);
+    QDir crashDir(crashDirPath);
+    if (!crashDir.exists()) {
+        QTextStream(stderr) << "Crash directory does not exist: " << crashDirPath << "\n";
+        return 1;
+    }
+
+    // Создаем папку out рядом с исполняемым файлом
+    QString outDirPath = QCoreApplication::applicationDirPath() + "/out";
+    QDir().mkpath(outDirPath);
+
+    QStringList jsonFiles = crashDir.entryList(QStringList() << "crash_*.json", QDir::Files);
+    if (jsonFiles.isEmpty()) {
+        QTextStream(stderr) << "No crash_*.json files found in directory: " << crashDirPath << "\n";
+        return 1;
+    }
+
+    for (const QString& fileName : jsonFiles) {
+        QString inputPath = crashDir.absoluteFilePath(fileName);
+        QString baseName = QFileInfo(fileName).completeBaseName(); // без .json
+        QString outputPath = outDirPath + "/" + baseName + ".txt";
+
+        DemonCrash demon(inputPath, outputPath, exePath, showSystemFrames);
+    }
 
     return 0;
 }

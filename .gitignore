@@ -1,0 +1,20 @@
+# Specify filepatterns you want git to ignore.
+
+build/
+**/build/
+**/debug/
+**/release/
+*.o
+*.so*
+*.pro.user*
+Makefile
+*.debug
+crash_*.*
+
+
+# Qt auto-generated files
+**/moc_*.cpp
+**/moc_*.o
+**/moc_*.h
+**/ui_*.h
+**/qrc_*.cpp

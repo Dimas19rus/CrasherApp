@@ -1,6 +1,10 @@
 #include "demon_crash.h"
+#include "crash_report_fields.h"
+#include "json_reader.h"
+#include "json_builder.h"
 
-DemonCrash::DemonCrash(const QString& inputLog, const QString& outLog, const QString& pathExe, const bool& showSystemsFrame):
+
+DemonCrash::DemonCrash(const QString& inputLog, const QString& outLog, const QString& pathExe, const bool& showSystemsFrame) :
     _inputLog(inputLog),
     _outLog(outLog),
     _showSystemsFrame(showSystemsFrame),
@@ -12,108 +16,102 @@ DemonCrash::DemonCrash(const QString& inputLog, const QString& outLog, const QSt
         return;
     }
 
+    QByteArray jsonData = inputFile.readAll();
+
+    JsonReader reader(jsonData.constData());
+    JsonValue root;
+    if (!reader.parse(root)) {
+        QTextStream(stderr) << "Invalid JSON format\n";
+        return;
+    }
+    if (root.getType() != JT_OBJECT) {
+        QTextStream(stderr) << "Invalid JSON format: root is not object\n";
+        return;
+    }
+
     QFile outputFile(_outLog);
     if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QTextStream(stderr) << "Cannot open output log file: " << _outLog << "\n";
         return;
     }
 
-    QTextStream in(&inputFile);
     QTextStream out(&outputFile);
+    out.setCodec("UTF-8");
+    auto rootObj = root.getObject();
 
-    QRegularExpression addrRegex("0x[0-9a-fA-F]+"); // для поиска адрессов
-    QString nameParent = "";
+    // 1. Время
+    if (auto timeVal = rootObj->find(CrashReportFields::TIME); timeVal && timeVal->getType() == JT_STRING) {
+        long long timestamp = std::stoll(timeVal->getString());
+        time_t t = static_cast<time_t>(timestamp);
+        struct tm tm_buf;
+        localtime_r(&t, &tm_buf);
+        char timeStr[64];
+        strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &tm_buf);
+        out << "------------------------------------------\n";
+        out << "1: Time: " << timeStr << "\n";
+    }
 
-    QRegularExpression lineIdRegex(R"(^(\d+):\s*(.*))");
+    // 2. Бинарник
+    QString debugFile;
+    if (auto binVal = rootObj->find(CrashReportFields::BINARY); binVal && binVal->getType() == JT_STRING) {
+        QString binary = binVal->getString();
+        out << "2: BinPath: " << binary << "\n";
+        debugFile = findDebugFileForExe(binary);
+        if (debugFile.isEmpty())
+            debugFile = findDebugFileForLib(binary);
 
-        bool inBacktrace = false;
+        if (!debugFile.isEmpty())
+            out << "   Debug file: " << debugFile << "\n";
+        else
+            out << "   Debug file: debug_info Null\n";
+    }
 
-        while (!in.atEnd()) {
-            QString line = in.readLine();
+    // 3. Сигнал
+    if (auto sigVal = rootObj->find(CrashReportFields::SIGNAL); sigVal && sigVal->getType() == JT_OBJECT) {
+        auto signalObj = sigVal->getObject();
+        const char* sigName = "";
+        int sigNum = 0;
+        const char* sigAddr = "";
 
-            QRegularExpressionMatch match = lineIdRegex.match(line);
-            if (!match.hasMatch()) {
-//                if (inBacktrace) {
-//                    // В backtrace идут адреса без префикса
-//                    QString addr = line.trimmed();
-//                    if (!addr.isEmpty()) {
-//                        // Обработка адреса
-//                        resolveAddress(_pathExe, addr, out, _showSystemsFrame);
-//                    }
-//                }
-                continue;
-            }
+        if (auto nameVal = signalObj->find(CrashReportFields::SIGNAL_NAME); nameVal && nameVal->getType() == JT_STRING)
+            sigName = nameVal->getString();
 
-            int id = match.captured(1).toInt();
-            QString content = match.captured(2);
+        if (auto numVal = signalObj->find(CrashReportFields::SIGNAL_NUMBER); numVal && numVal->getType() == JT_INT)
+            sigNum = numVal->getInt();
 
-            switch (id) {
-                case 1:
-                    // дата/время
-                    out << "------------------------------------------\n";
-                    out << "1: " << content << "\n";
-                    inBacktrace = false;
-                    break;
-                case 2:
-                    // файл (exe/lib)
-                    out << "2: " << content << "\n";
-                    _pathExe = content; // или логика выбора
-                    if(isExecutablePath(_pathExe) != NULE_NAME){
-                        nameParent = findDebugFileForExe(_pathExe);
-                        if (nameParent == QString())
-                            nameParent = findDebugFileForLib(_pathExe);
-                        if (nameParent != QString())
-                            out << "   " << nameParent << "\n";
-                        else
-                            out << "   debug_info Null" << "\n";
-                    }
+        if (auto addrVal = signalObj->find(CrashReportFields::SIGNAL_ADDRESS); addrVal && addrVal->getType() == JT_STRING)
+            sigAddr = addrVal->getString();
 
-                    inBacktrace = false;
-                    break;
-                case 3:
-                    // сигнал
-                    out << "3: " << content << "\n";
+        out << "3: Signal: " << sigName << " (" << sigNum << ")\n";
+        out << "   Address: " << sigAddr << "\n";
+    }
 
-                    inBacktrace = false;
-                    break;
-                case 4:
-                    {
-                        // описание
-                        out << "4: " << content << "\n";
-                        auto matchIterator = addrRegex.globalMatch(content);
-                        while (matchIterator.hasNext()) {
-                            auto match = matchIterator.next();
-                            QString addr = match.captured(0);
-                            resolveAddress(nameParent, addr, out, _showSystemsFrame);
-                        }
-                        inBacktrace = false;
-                        break;
-                    }
-                case 5:
-                    {
-                        // instruction pointer
-                        out << "5: " << content << "\n";
-                        auto matchIterator = addrRegex.globalMatch(content);
-                        while (matchIterator.hasNext()) {
-                            auto match = matchIterator.next();
-                            QString addr = match.captured(0);
-                            resolveAddress(nameParent, addr, out, _showSystemsFrame);
-                        }
-                        inBacktrace = false;
-                        out << "------------------------------------------\n";
-                        break;
-                    }
-                case 6:
-                    // backtrace начинается
-                    out << id << "\n";
-                    inBacktrace = true;
-                    break;
-                default:
-                    out << line << "\n";
-                    inBacktrace = false;
-                    break;
+    // 4. Оффсет
+    if (auto offVal = rootObj->find(CrashReportFields::OFFSET); offVal && offVal->getType() == JT_STRING) {
+        QString offset = offVal->getString();
+        out << "4: Offset: " << offset << "\n";
+        resolveAddress(debugFile, offset, out, _showSystemsFrame);
+    }
+
+    // 5. Instruction pointer
+    if (auto ipVal = rootObj->find(CrashReportFields::INSTRUCTION_POINTER); ipVal && ipVal->getType() == JT_STRING) {
+        QString ip = ipVal->getString();
+        out << "5: Instruction pointer: " << ip << "\n";
+        resolveAddress(debugFile, ip, out, _showSystemsFrame);
+        out << "------------------------------------------\n";
+    }
+
+    // 6. Backtrace
+    if (auto btVal = rootObj->find("backtrace"); btVal && btVal->getType() == JT_ARRAY) {
+        out << "6\n";
+        auto backtrace = btVal->getArray();
+        for (int i = 0; i < backtrace->size(); ++i) {
+            auto addrVal = backtrace->at(i);
+            if (addrVal.getType() == JT_STRING) {
+                resolveAddress(debugFile, addrVal.getString(), out, _showSystemsFrame);
             }
         }
+    }
 }
 
 //Это используеться если у нас showSystemsFrame = false, когда включен бэкртейс мы отсеивает строки принадлижащие системным библиотекам потому что скорее всего нет .debug инфы по ним ну или наоборот может не отсеивать (showSystemsFrame = true)

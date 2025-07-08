@@ -1,25 +1,32 @@
 QT       += core gui
-
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
-
-CONFIG += c++11
+CONFIG   += c++11
 
 TARGET = MyApp
 
-#Это для того чтобы отделить debug файл от релиза
-release {
+# Каталог вывода — разделяем debug и release
+CONFIG(debug, debug|release) {
+    DESTDIR = $$PWD/../../build/debug/example/
+    LIBS += -L$$PWD/../../build/debug/libs/ -lerror_logger
+    LIBS += -L$$PWD/../../build/debug/example/ -ltest
+    QMAKE_RPATHDIR += $$PWD/build/debug
+}
+CONFIG(release, debug|release) {
+    DESTDIR = $$PWD/../../build/release/example/
+    LIBS += -L$$PWD/../../build/release/libs/ -lerror_logger
+    LIBS += -L$$PWD/../../build/release/example/ -ltest
+    QMAKE_RPATHDIR += $$PWD/build/release
+
     QMAKE_CFLAGS_RELEASE += -g -O2 -fdebug-prefix-map=$$PWD=.
     QMAKE_CXXFLAGS_RELEASE += -g -O2 -fdebug-prefix-map=$$PWD=.
 
     QMAKE_LFLAGS_RELEASE += -Wl,--build-id
 
-    TARGET_PATH = $$OUT_PWD/$$TARGET
-    message($$TARGET_PATH)
-    QMAKE_POST_LINK = objcopy --only-keep-debug "$${TARGET_PATH}" "$${TARGET_PATH}.debug"; \
-                      objcopy --strip-debug "$${TARGET_PATH}"; \
-                      objcopy --add-gnu-debuglink="$${TARGET_PATH}.debug" "$${TARGET_PATH}"
+    # Отдельные действия после сборки релиза (примеры objcopy)
+    QMAKE_POST_LINK = objcopy --only-keep-debug "$$DESTDIR/$$TARGET" "$$DESTDIR/$$TARGET.debug"; \
+                      objcopy --strip-debug "$$DESTDIR/$$TARGET"; \
+                      objcopy --add-gnu-debuglink="$$DESTDIR/$$TARGET.debug" "$$DESTDIR/$$TARGET"
 }
-
 
 SOURCES += \
     main.cpp \
@@ -31,12 +38,10 @@ HEADERS += \
 FORMS += \
     mainwindow.ui
 
+INCLUDEPATH += $$PWD/../example_lib
+INCLUDEPATH += $$PWD/../../libs/error_logger
 
 
-INCLUDEPATH += ../libtest ../liberror
-
-LIBS += -L$$OUT_PWD -ltest -lerror
-QMAKE_RPATHDIR += $$OUT_PWD
 
 qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin

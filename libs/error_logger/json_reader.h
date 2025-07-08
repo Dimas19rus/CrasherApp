@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <string>
+#include <memory>
 
 #include "json_builder.h"
 
@@ -16,71 +17,70 @@ class JsonReader {
 
     bool match(const char* kw) {
         size_t len = strlen(kw);
-        if (strncmp(ptr, kw, len) == 0) {
+        if (strncmp(ptr, kw, len) == 0 && !isalnum(ptr[len])) {
             ptr += len;
             return true;
         }
         return false;
     }
 
-    bool parseString(char* out, size_t outSize) {
+    bool parseString(std::string& out) {
         if (*ptr != '"') return false;
         ++ptr;
-        size_t pos = 0;
-        while (*ptr && *ptr != '"' && pos + 1 < outSize) {
+        out.clear();
+
+        while (*ptr && *ptr != '"') {
             if (*ptr == '\\') {
                 ++ptr;
-                if (!*ptr) break;
-                // Простая поддержка экранирования (\", \\, \n, \t)
+                if (!*ptr) return false;
                 switch (*ptr) {
-                    case '"':  out[pos++] = '"';  break;
-                    case '\\': out[pos++] = '\\'; break;
-                    case 'n':  out[pos++] = '\n'; break;
-                    case 't':  out[pos++] = '\t'; break;
-                    // Можно добавить другие escape-последовательности
+                    case '"':  out.push_back('"');  break;
+                    case '\\': out.push_back('\\'); break;
+                    case 'n':  out.push_back('\n'); break;
+                    case 't':  out.push_back('\t'); break;
+                    // Добавьте другие escape-последовательности при необходимости
                     default:
-                        out[pos++] = *ptr;
+                        out.push_back(*ptr);
                         break;
                 }
                 ++ptr;
             } else {
-                out[pos++] = *ptr++;
+                out.push_back(*ptr++);
             }
         }
         if (*ptr != '"') return false;
         ++ptr;
-        out[pos] = '\0';
         return true;
     }
 
     bool parseNumber(int& out) {
-        char buf[32];
-        size_t len = 0;
-        if (*ptr == '-') {
-            buf[len++] = *ptr++;
+        const char* start = ptr;
+        if (*ptr == '-') ++ptr;
+        if (!isdigit(*ptr)) return false;
+        while (isdigit(*ptr)) ++ptr;
+
+        std::string numStr(start, ptr - start);
+        try {
+            out = std::stoi(numStr);
+        } catch (...) {
+            return false;
         }
-        while (*ptr && isdigit(*ptr)) {
-            if (len < sizeof(buf) - 1)
-                buf[len++] = *ptr++;
-            else
-                return false;
-        }
-        buf[len] = '\0';
-        if (len == 0 || (len == 1 && buf[0] == '-')) return false;
-        out = atoi(buf);
         return true;
     }
 
-    bool parseObject(JsonObject* obj, char* strBuf, size_t strBufSize) {
+    bool parseObject(std::shared_ptr<JsonObject>& obj, std::string& strBuf) {
         if (*ptr != '{') return false;
         ++ptr;
         skipWhitespace();
 
+        obj = std::make_shared<JsonObject>();
+
         while (*ptr && *ptr != '}') {
             skipWhitespace();
             if (*ptr != '"') return false;
-            if (!parseString(strBuf, strBufSize)) return false;
-            std::string key(strBuf);
+
+            std::string key;
+            if (!parseString(key)) return false;
 
             skipWhitespace();
             if (*ptr != ':') return false;
@@ -88,9 +88,17 @@ class JsonReader {
             skipWhitespace();
 
             JsonValue val;
-            if (!parseValue(val, strBuf, strBufSize)) return false;
+            if (!parseValue(val, strBuf)) return false;
 
-            if (!obj->insert(key.c_str(), val)) return false;
+            // Копируем строку ключа в отдельный буфер (JsonObject лучше хранит std::string)
+            // Примерно так, чтобы ключ был валиден:
+            char* key_cstr = new char[key.size() + 1];
+            strcpy(key_cstr, key.c_str());
+
+            if (!obj->insert(key_cstr, val)) {
+                delete[] key_cstr;
+                return false;
+            }
 
             skipWhitespace();
             if (*ptr == ',') {
@@ -105,14 +113,16 @@ class JsonReader {
         return true;
     }
 
-    bool parseArray(JsonArray* arr, char* strBuf, size_t strBufSize) {
+    bool parseArray(std::shared_ptr<JsonArray>& arr, std::string& strBuf) {
         if (*ptr != '[') return false;
         ++ptr;
         skipWhitespace();
 
+        arr = std::make_shared<JsonArray>();
+
         while (*ptr && *ptr != ']') {
             JsonValue val;
-            if (!parseValue(val, strBuf, strBufSize)) return false;
+            if (!parseValue(val, strBuf)) return false;
 
             if (!arr->append(val)) return false;
 
@@ -129,11 +139,15 @@ class JsonReader {
         return true;
     }
 
-    bool parseValue(JsonValue& out, char* strBuf, size_t strBufSize) {
+    bool parseValue(JsonValue& out, std::string& strBuf) {
         skipWhitespace();
         if (*ptr == '"') {
-            if (!parseString(strBuf, strBufSize)) return false;
-            out = JsonValue(strBuf);
+            if (!parseString(strBuf)) return false;
+            // Здесь нужно хранить строку отдельно, чтобы lifetime не сломался
+            // Можно копировать в heap (JsonValue конструктор с const char* хранит указатель)
+            char* str_copy = new char[strBuf.size() + 1];
+            strcpy(str_copy, strBuf.c_str());
+            out = JsonValue(str_copy);
             return true;
         } else if (isdigit(*ptr) || *ptr == '-') {
             int val;
@@ -150,26 +164,36 @@ class JsonReader {
             out = JsonValue();
             return true;
         } else if (*ptr == '{') {
-            JsonObject obj;
-            if (!parseObject(&obj, strBuf, strBufSize)) return false;
-            out = JsonValue(&obj);
+            std::shared_ptr<JsonObject> obj;
+            if (!parseObject(obj, strBuf)) return false;
+            out = JsonValue(std::move(obj));
             return true;
         } else if (*ptr == '[') {
-            JsonArray arr;
-            if (!parseArray(&arr, strBuf, strBufSize)) return false;
-            out = JsonValue(&arr);
+            std::shared_ptr<JsonArray> arr;
+            if (!parseArray(arr, strBuf)) return false;
+            out = JsonValue(std::move(arr));
             return true;
         }
         return false;
+    }
+
+    JsonValue parseJson(const char* data) {
+        ptr = data;
+        std::string strBuf;
+        JsonValue result;
+        if (!parseValue(result, strBuf)) {
+            return JsonValue();
+        }
+        return result;
     }
 
 public:
     explicit JsonReader(const char* jsonText) : ptr(jsonText) {}
 
     bool parse(JsonValue& rootVal) {
-        char tmpStr[128]; // буфер для строк
-        if (!parseValue(rootVal, tmpStr, sizeof(tmpStr))) return false;
+        std::string tmpStr;
+        if (!parseValue(rootVal, tmpStr)) return false;
         skipWhitespace();
-        return *ptr == '\0'; // проверка конца входных данных
+        return *ptr == '\0'; // проверка конца
     }
 };
